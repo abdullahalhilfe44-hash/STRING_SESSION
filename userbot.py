@@ -1,124 +1,95 @@
+import os
+import sqlite3
+import asyncio
 from telethon import TelegramClient, events, Button
+from telethon.sessions import StringSession
 
-client = TelegramClient("my_session", 2040, "b18441a1ff607e10a989891a5462e627")
-groups = {}
+# إعداد المتغيرات الأساسية من البيئة أو القيم الافتراضية
+API_ID = int(os.environ.get("API_ID", 2040))
+API_HASH = os.environ.get("API_HASH", "b18441a1ff607e10a989891a5462e627")
+STRING_SESSION = os.environ.get("STRING_SESSION", "")
 
-@client.on(events.NewMessage(incoming=True))
-async def incoming(e):
-    if e.is_private and not e.is_group:
-        await e.forward_to("me")
+PHONE_NUMBER = "+9647721606233"
+USER_ID = 8164462667
 
-@client.on(events.NewMessage(outgoing=True))
-async def out(e):
-    global groups
-    if e.is_private and e.chat_id == (await client.get_me()).id:
-        t = e.raw_text.strip()
-        target_chat = e.chat_id
-        
-        # 1. حفظ مجموعة ضخمة دفعة واحدة (تصل إلى 1000+ مقطع): /مجموعة 1 1000
-        if t.startswith("/مجموعة ") or t.startswith("/savegroup "):
-            parts = t.split(" ")
-            if len(parts) >= 2 and e.is_reply:
-                try:
-                    k = parts[1]
-                    target_count = int(parts[2]) if len(parts) > 2 else 50
-                    reply_msg = await e.get_reply_message()
-                    start_id = reply_msg.id
-                    
-                    await e.edit(f"⏳ جاري فحص وسحب {target_count} مقطع، يرجى الانتظار...")
-                    
-                    msgs = []
-                    # نطاق بحث واسع جداً لضمان تغطية العدد المطلوب حتى لو كانت هناك نصوص كثيرة بين المقاطع
-                    search_limit = target_count * 15
-                    
-                    async for msg in client.iter_messages(target_chat, min_id=start_id - 1, limit=search_limit, reverse=True):
-                        if msg.media:
-                            msgs.append(msg)
-                            if len(msgs) >= target_count:
-                                break
-                    
-                    groups[k] = msgs
-                    await e.edit(f"✅ تم حفظ {len(msgs)} مقطع بنجاح (مستهدف: {target_count}) تحت المفتاح: /{k}")
-                except Exception as ex:
-                    await e.edit(f"❌ حدث خطأ: {str(ex)}")
-            else:
-                await e.edit("❌ الاستخدام الصحيح: الرد على أول مقطع ثم كتابة /مجموعة <المفتاح> <العدد> (مثال: /مجموعة 1 1000)")
-        
-        # 2. الإضافة التدريجية مقطع بمقطع: /إضافة 1
-        elif t.startswith("/إضافة ") or t.startswith("/add "):
-            parts = t.split(" ")
-            if len(parts) >= 2 and e.is_reply:
-                try:
-                    reply_msg = await e.get_reply_message()
-                    if reply_msg and reply_msg.media:
-                        k = parts[1]
-                        if k not in groups:
-                            groups[k] = []
-                        groups[k].append(reply_msg)
-                        await e.edit(f"✅ تمت إضافة المقطع للمفتاح: /{k}\n📁 الإجمالي الحالي: {len(groups[k])} مقطع")
-                    else:
-                        await e.edit("❌ خطأ: الرسالة المحددة بالرد لا تحتوي على ميديا.")
-                except Exception as ex:
-                    await e.edit(f"❌ حدث خطأ: {str(ex)}")
-            else:
-                await e.edit("❌ الاستخدام الصحيح: الرد على المقطع مع كتابة /إضافة <المفتاح>")
-        
-        # 3. حذف مفتاح: /حذف 1
-        elif t.startswith("/حذف ") or t.startswith("/del ") or t.startswith("/delete "):
-            try:
-                k = t.split(" ")[1]
-                if k in groups:
-                    del groups[k]
-                    await e.edit(f"🗑️ تم حذف المفتاح /{k} بنجاح!")
-                else:
-                    await e.edit(f"⚠️ المفتاح /{k} غير موجود.")
-            except Exception:
-                await e.edit("❌ الاستخدام الصحيح: /حذف <المفتاح>")
-        
-        # 4. عرض اللوحة: /قائمة
-        elif t == "/قائمة" or t == "/list":
-            if groups:
-                buttons = []
-                for k in groups.keys():
-                    buttons.append([Button.inline(f"📤 إرسال /{k} ({len(groups[k])})", data=f"send_{k}".encode()),
-                                    Button.inline(f"🗑️ حذف /{k}", data=f"del_{k}".encode())])
-                await e.edit("📋 **لوحة تحكم المفاتيح المحفوظة:**", buttons=buttons)
-            else:
-                await e.edit("📭 لا توجد مفاتيح محفوظة حالياً.")
-        
-        # 5. إرسال مباشر بكتابة المفتاح مثل /1
-        elif t.startswith("/"):
-            k = t[1:]
-            if k in groups:
-                await e.delete()
-                for msg in groups[k]:
-                    await client.send_message(target_chat, msg)
+# إنشاء العميل والاتصال بقاعدة البيانات
+client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
+db = sqlite3.connect("database.db", check_same_thread=False)
+cursor = db.cursor()
 
-# التعامل مع الأزرار الشفافة
-@client.on(events.CallbackQuery)
-async def callback(event):
-    global groups
-    data = event.data.decode()
-    sender_id = event.chat_id
+# إنشاء الجدول إذا لم يكن موجوداً
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS groups (
+    key TEXT UNIQUE,
+    chat_id INTEGER,
+    msg_id INTEGER
+)
+""")
+db.commit()
+
+# --- دالات التعامل مع قاعدة البيانات ---
+def save_group(key, chat_id, msg_id):
+    try:
+        with db:
+            cursor.execute(
+                "INSERT OR REPLACE INTO groups (key, chat_id, msg_id) VALUES (?, ?, ?)",
+                (key, chat_id, msg_id)
+            )
+        return True
+    except Exception as e:
+        print(f"Error saving to DB: {e}")
+        return False
+
+def get_all_groups():
+    cursor.execute("SELECT key, chat_id, msg_id FROM groups")
+    return cursor.fetchall()
+
+# --- مستمع الأحداث والرسائل ---
+
+# 1. أمر حفظ المجموعة الحالية
+@client.on(events.NewMessage(outgoing=True, pattern=r'\.save (.+)'))
+async def handle_save(event):
+    key = event.pattern_match.group(1).strip()
+    chat_id = event.chat_id
+    msg_id = event.id
     
-    if data.startswith("send_"):
-        k = data.split("_")[1]
-        if k in groups:
-            await event.answer(f"جاري إرسال مجموعة /{k}...")
-            for msg in groups[k]:
-                await client.send_message(sender_id, msg)
-        else:
-            await event.answer("المفتاح غير موجود!", alert=True)
-            
-    elif data.startswith("del_"):
-        k = data.split("_")[1]
-        if k in groups:
-            del groups[k]
-            await event.answer(f"تم حذف المفتاح /{k}")
-            await event.edit(f"🗑️ تم حذف المفتاح /{k} بنجاح.")
-        else:
-            await event.answer("المفتاح غير موجود مسبقاً", alert=True)
+    if save_group(key, chat_id, msg_id):
+        await event.edit(f"✅ تم حفظ هذه المجموعة بنجاح تحت مفتاح: **{key}**")
+    else:
+        await event.edit("❌ حدث خطأ أثناء محاولة الحفظ في قاعدة البيانات.")
 
-print("Bot running with support for up to 1000+ batch items...")
-client.start()
-client.run_until_disconnected()
+# 2. أمر عرض القائمة مع أزرار تفاعلية
+@client.on(events.NewMessage(outgoing=True, pattern=r'\.list'))
+async def handle_list(event):
+    saved_items = get_all_groups()
+    
+    if not saved_items:
+        await event.edit("📭 لا توجد أي مجموعات محفوظة حالياً.")
+        return
+    
+    buttons = []
+    text = "📂 **قائمة المجموعات المحفوظة:**\n\n"
+    
+    for index, (key, chat_id, msg_id) in enumerate(saved_items, start=1):
+        text += f"{index}. **{key}** (Chat ID: `{chat_id}`)\n"
+        # إنشاء رابط تليجرام مباشر للرسالة المحفوظة داخل المجموعة
+        # المجموعات الخارقة (Supergroups) تبدأ معرفاتها غالباً بـ -100
+        clean_chat_id = str(chat_id).replace("-100", "")
+        msg_url = f"https://t.me{clean_chat_id}/{msg_id}"
+        
+        buttons.append([Button.url(f"🔗 انتقال إلى {key}", msg_url)])
+        
+    await event.edit(text, buttons=buttons)
+
+# --- تشغيل البوت ---
+async def main():
+    print("جاري تشغيل البوت والاتصال بتليجرام...")
+    # إذا كانت الجلسة فارغة، سيطلب الكود التحقق عبر رقم الهاتف في الترمينال
+    await client.start(phone=PHONE_NUMBER)
+    print("Bot ready... البوت يعمل الآن بنجاح!")
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())
+    
